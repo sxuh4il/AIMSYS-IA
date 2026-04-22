@@ -1,173 +1,192 @@
-"""Autoencoder model architectures for anomaly detection."""
-
-from __future__ import annotations
-
-from typing import Sequence
+"""
+Dense Autoencoder architecture for anomaly detection in automotive event data.
+"""
 
 import torch
-from torch import Tensor, nn
+import torch.nn as nn
+from typing import List, Tuple
 
 
-def _ensure_positive(value: int, name: str) -> None:
-    """Validate that an integer hyperparameter is positive."""
-    if value <= 0:
-        raise ValueError(f"{name} must be > 0, got {value}.")
-
-
-class MLPAutoencoder(nn.Module):
-    """Fully connected autoencoder for tabular feature vectors."""
-
+class Encoder(nn.Module):
+    """
+    Encoder network that compresses input features to a latent representation.
+    """
+    
     def __init__(
         self,
         input_dim: int,
+        hidden_dims: List[int],
         latent_dim: int,
-        hidden_dims: Sequence[int] = (128, 64),
-        dropout: float = 0.0,
-    ) -> None:
-        """
-        Create a lightweight MLP autoencoder.
-
-        Args:
-            input_dim: Number of input features.
-            latent_dim: Dimension of the latent representation.
-            hidden_dims: Hidden layer widths for the encoder.
-            dropout: Optional dropout probability for hidden layers.
-        """
+        dropout_rate: float = 0.1,
+        use_batch_norm: bool = True
+    ):
         super().__init__()
-
-        _ensure_positive(input_dim, "input_dim")
-        _ensure_positive(latent_dim, "latent_dim")
-        if dropout < 0.0 or dropout >= 1.0:
-            raise ValueError(f"dropout must be in [0.0, 1.0), got {dropout}.")
-
-        hidden_dims = tuple(hidden_dims)
+        
+        layers = []
+        prev_dim = input_dim
+        
+        # Build hidden layers
         for hidden_dim in hidden_dims:
-            _ensure_positive(int(hidden_dim), "hidden_dim")
-
-        encoder_layers: list[nn.Module] = []
-        previous_dim = input_dim
-        for hidden_dim in hidden_dims:
-            encoder_layers.append(nn.Linear(previous_dim, hidden_dim))
-            encoder_layers.append(nn.ReLU())
-            if dropout > 0.0:
-                encoder_layers.append(nn.Dropout(p=dropout))
-            previous_dim = hidden_dim
-
-        self.encoder_backbone = nn.Sequential(*encoder_layers)
-        self.to_latent = nn.Linear(previous_dim, latent_dim)
-
-        decoder_layers: list[nn.Module] = []
-        previous_dim = latent_dim
-        for hidden_dim in reversed(hidden_dims):
-            decoder_layers.append(nn.Linear(previous_dim, hidden_dim))
-            decoder_layers.append(nn.ReLU())
-            if dropout > 0.0:
-                decoder_layers.append(nn.Dropout(p=dropout))
-            previous_dim = hidden_dim
-
-        self.decoder_backbone = nn.Sequential(*decoder_layers)
-        self.reconstruction_head = nn.Linear(previous_dim, input_dim)
-
-    def encode(self, inputs: Tensor) -> Tensor:
-        """Encode input vectors into latent embeddings."""
-        if inputs.dim() != 2:
-            raise ValueError(
-                f"MLPAutoencoder expects [batch, features] input, got {tuple(inputs.shape)}."
-            )
-        hidden = self.encoder_backbone(inputs)
-        return self.to_latent(hidden)
-
-    def decode(self, latent: Tensor) -> Tensor:
-        """Decode latent embeddings back to reconstructed vectors."""
-        if latent.dim() != 2:
-            raise ValueError(
-                f"MLPAutoencoder expects [batch, latent_dim] latent tensor, got {tuple(latent.shape)}."
-            )
-        hidden = self.decoder_backbone(latent)
-        return self.reconstruction_head(hidden)
-
-    def forward(self, inputs: Tensor) -> Tensor:
-        """Run end-to-end reconstruction."""
-        latent = self.encode(inputs)
-        return self.decode(latent)
+            layers.append(nn.Linear(prev_dim, hidden_dim))
+            if use_batch_norm:
+                layers.append(nn.BatchNorm1d(hidden_dim))
+            layers.append(nn.ReLU())
+            layers.append(nn.Dropout(dropout_rate))
+            prev_dim = hidden_dim
+        
+        # Final layer to latent space
+        layers.append(nn.Linear(prev_dim, latent_dim))
+        
+        self.network = nn.Sequential(*layers)
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Encode input to latent representation."""
+        return self.network(x)
 
 
-class LSTMAutoencoder(nn.Module):
-    """LSTM autoencoder for sequence-like numerical feature vectors."""
-
+class Decoder(nn.Module):
+    """
+    Decoder network that reconstructs input from latent representation.
+    """
+    
     def __init__(
         self,
-        input_dim: int,
         latent_dim: int,
-        hidden_dim: int = 64,
-        num_layers: int = 1,
-        dropout: float = 0.0,
-    ) -> None:
-        """
-        Create an LSTM-based autoencoder for temporal or sequence-like features.
-
-        Args:
-            input_dim: Number of features per time step.
-            latent_dim: Latent bottleneck dimension.
-            hidden_dim: Hidden size used by encoder/decoder LSTMs.
-            num_layers: Number of LSTM layers.
-            dropout: LSTM dropout applied between stacked layers.
-        """
+        hidden_dims: List[int],
+        output_dim: int,
+        dropout_rate: float = 0.1,
+        use_batch_norm: bool = True
+    ):
         super().__init__()
+        
+        layers = []
+        prev_dim = latent_dim
+        
+        # Build hidden layers
+        for hidden_dim in hidden_dims:
+            layers.append(nn.Linear(prev_dim, hidden_dim))
+            if use_batch_norm:
+                layers.append(nn.BatchNorm1d(hidden_dim))
+            layers.append(nn.ReLU())
+            layers.append(nn.Dropout(dropout_rate))
+            prev_dim = hidden_dim
+        
+        # Final reconstruction layer (no activation for normalized data)
+        layers.append(nn.Linear(prev_dim, output_dim))
+        
+        self.network = nn.Sequential(*layers)
+    
+    def forward(self, z: torch.Tensor) -> torch.Tensor:
+        """Decode latent representation to reconstructed output."""
+        return self.network(z)
 
-        _ensure_positive(input_dim, "input_dim")
-        _ensure_positive(latent_dim, "latent_dim")
-        _ensure_positive(hidden_dim, "hidden_dim")
-        _ensure_positive(num_layers, "num_layers")
-        if dropout < 0.0 or dropout >= 1.0:
-            raise ValueError(f"dropout must be in [0.0, 1.0), got {dropout}.")
 
-        lstm_dropout = dropout if num_layers > 1 else 0.0
-
-        self.encoder_lstm = nn.LSTM(
-            input_size=input_dim,
-            hidden_size=hidden_dim,
-            num_layers=num_layers,
-            batch_first=True,
-            dropout=lstm_dropout,
+class DenseAutoencoder(nn.Module):
+    """
+    Dense (fully connected) Autoencoder for anomaly detection.
+    
+    This autoencoder learns to compress and reconstruct normal event patterns.
+    Anomalies are detected by high reconstruction error, as the model
+    struggles to reconstruct patterns it hasn't learned during training.
+    """
+    
+    def __init__(
+        self,
+        input_dim: int = 10,
+        encoder_dims: List[int] = None,
+        latent_dim: int = 8,
+        decoder_dims: List[int] = None,
+        dropout_rate: float = 0.1,
+        use_batch_norm: bool = True
+    ):
+        super().__init__()
+        
+        # Default hidden dimensions if not provided
+        encoder_dims = encoder_dims or [64, 32, 16]
+        decoder_dims = decoder_dims or [16, 32, 64]
+        
+        self.input_dim = input_dim
+        self.latent_dim = latent_dim
+        
+        # Build encoder and decoder
+        self.encoder = Encoder(
+            input_dim=input_dim,
+            hidden_dims=encoder_dims,
+            latent_dim=latent_dim,
+            dropout_rate=dropout_rate,
+            use_batch_norm=use_batch_norm
         )
-        self.to_latent = nn.Linear(hidden_dim, latent_dim)
-        self.from_latent = nn.Linear(latent_dim, hidden_dim)
-        self.decoder_lstm = nn.LSTM(
-            input_size=hidden_dim,
-            hidden_size=hidden_dim,
-            num_layers=num_layers,
-            batch_first=True,
-            dropout=lstm_dropout,
+        
+        self.decoder = Decoder(
+            latent_dim=latent_dim,
+            hidden_dims=decoder_dims,
+            output_dim=input_dim,
+            dropout_rate=dropout_rate,
+            use_batch_norm=use_batch_norm
         )
-        self.reconstruction_head = nn.Linear(hidden_dim, input_dim)
+    
+    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Forward pass through the autoencoder.
+        
+        Args:
+            x: Input tensor of shape (batch_size, input_dim)
+            
+        Returns:
+            Tuple of (reconstructed_output, latent_representation)
+        """
+        z = self.encoder(x)
+        x_reconstructed = self.decoder(z)
+        return x_reconstructed, z
+    
+    def encode(self, x: torch.Tensor) -> torch.Tensor:
+        """Encode input to latent representation."""
+        return self.encoder(x)
+    
+    def decode(self, z: torch.Tensor) -> torch.Tensor:
+        """Decode latent representation to output."""
+        return self.decoder(z)
+    
+    def get_model_summary(self) -> str:
+        """Return a string summary of the model architecture."""
+        total_params = sum(p.numel() for p in self.parameters())
+        trainable_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
+        
+        summary = [
+            "=" * 60,
+            "Dense Autoencoder Architecture",
+            "=" * 60,
+            f"Input Dimension: {self.input_dim}",
+            f"Latent Dimension: {self.latent_dim}",
+            "-" * 60,
+            "Encoder:",
+            str(self.encoder.network),
+            "-" * 60,
+            "Decoder:", 
+            str(self.decoder.network),
+            "-" * 60,
+            f"Total Parameters: {total_params:,}",
+            f"Trainable Parameters: {trainable_params:,}",
+            "=" * 60
+        ]
+        return "\n".join(summary)
 
-    def encode(self, inputs: Tensor) -> Tensor:
-        """Encode an input sequence into a fixed-size latent vector."""
-        if inputs.dim() != 3:
-            raise ValueError(
-                "LSTMAutoencoder expects [batch, sequence_length, features] input, "
-                f"got {tuple(inputs.shape)}."
-            )
-        _, (hidden_state, _) = self.encoder_lstm(inputs)
-        final_hidden = hidden_state[-1]
-        return self.to_latent(final_hidden)
 
-    def decode(self, latent: Tensor, sequence_length: int) -> Tensor:
-        """Decode latent vectors into reconstructed sequences."""
-        if latent.dim() != 2:
-            raise ValueError(
-                "LSTMAutoencoder expects [batch, latent_dim] latent tensor, "
-                f"got {tuple(latent.shape)}."
-            )
-        _ensure_positive(sequence_length, "sequence_length")
-
-        seed = torch.tanh(self.from_latent(latent))
-        repeated_seed = seed.unsqueeze(1).repeat(1, sequence_length, 1)
-        decoded_hidden, _ = self.decoder_lstm(repeated_seed)
-        return self.reconstruction_head(decoded_hidden)
-
-    def forward(self, inputs: Tensor) -> Tensor:
-        """Run sequence reconstruction."""
-        latent = self.encode(inputs)
-        return self.decode(latent, sequence_length=inputs.size(1))
+def create_autoencoder_from_config(config) -> DenseAutoencoder:
+    """
+    Factory function to create a DenseAutoencoder from configuration.
+    
+    Args:
+        config: AutoencoderConfig object with model parameters
+        
+    Returns:
+        Initialized DenseAutoencoder model
+    """
+    return DenseAutoencoder(
+        input_dim=config.input_dim,
+        encoder_dims=config.encoder_dims,
+        latent_dim=config.latent_dim,
+        decoder_dims=config.decoder_dims,
+        dropout_rate=config.dropout_rate,
+        use_batch_norm=config.use_batch_norm
+    )
